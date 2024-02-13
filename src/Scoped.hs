@@ -3,8 +3,10 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE PatternSynonyms #-}
 
+
 module Scoped where
 import Control.Monad (ap, liftM)
+import Data.Functor.Identity (Identity (Identity, runIdentity))
 
 ----------- global machinery ------------
 
@@ -58,16 +60,16 @@ instance (Syntax sig) => sig :>> sig where
     inj = id
     prj = Just
 
-instance {-# OVERLAPPING #-} (Syntax sig1, Syntax sig2) => sig1 :>> (sig1 :+: sig2) where
-    inj = L
-    prj (L prog) = Just prog
-    prj _ = Nothing
-
-instance (Syntax sig1, sig :>> sig2) => sig :>> (sig1 :+: sig2) where
+instance {-# OVERLAPPABLE #-} (Syntax sig1, sig :>> sig2) => sig :>> (sig1 :+: sig2) where
     inj = R . inj
     prj = \case
         R prog -> prj prog
         L _ -> Nothing
+
+instance (Syntax sig1, Syntax sig2) => sig1 :>> (sig1 :+: sig2) where
+    inj = L
+    prj (L prog) = Just prog
+    prj _ = Nothing
 
 inject:: (sub :>> sup) => sub (Prog sup) a -> Prog sup a
 inject = Op . inj
@@ -125,7 +127,7 @@ pattern Catch p h k <- (project -> Just (Catch' p h k))
 catch::(HExc e :>> sig) => Prog sig a -> (e -> Prog sig a) -> Prog sig a
 catch prog handler = inject (Catch' prog handler pure)
 
-runExc:: Syntax sig => Prog (HExc e :+: sig) a -> Prog sig (Either e a)
+runExc:: forall e sig a. Syntax sig => Prog (HExc e :+: sig) a -> Prog sig (Either e a)
 runExc = \case
     (Return x) -> pure (Right x)
     (Other op) -> Op $ weave (Right ()) (either (pure . Left) runExc) op--undefined
@@ -150,7 +152,7 @@ data State s cnt =
 
 type HState s = Lift (State s)
 
-pattern Get :: (Lift (State s) :>> sup) => (s -> Prog sup a) -> Prog sup a
+pattern Get :: (HState s :>> sup) => (s -> Prog sup a) -> Prog sup a
 pattern Get k <- (project -> Just ( Lift (Get' k)) )
 
 get::(HState s :>> sig) => Prog sig s
@@ -179,6 +181,33 @@ run::Prog HVoid a -> a
 run (Return x) = x
 run _ = error "Void shouldn't have anything except return"
 
+----- Thrower Handler ------
+-- runStateGetless:: (Syntax sig, HExc String :>> sig) => s -> Prog (HState s :+: sig) a -> Prog sig (s, a)
+-- runStateGetless s = \case
+--     (Return a) -> Return (s, a)
+--     (Get _) -> undefined--throw "Nah, no getties for you"
+--     (Put s' k) -> runState s' k
+--     (Other op) -> Op $ weave (s, ()) (uncurry runState) op
+--     _ -> undefined 
+
+newtype Action cnt = Action' cnt
+    deriving Functor
+
+type HAction = Lift Action
+
+
+pattern Action :: (Lift Action :>> sup) => Prog sup a -> Prog sup a
+pattern Action cnt <- (project -> Just (Lift (Action' cnt)))
+
+act:: (HAction :>> sig) => Prog sig ()
+act = inject (Lift (Action' ( pure () )))
+
+runAction::(HExc String :>> sig) => Prog (HAction :+: sig) a -> Prog sig (Identity a)
+runAction = \case
+    (Return x) -> Return $ pure x
+    (Action _) -> throw "haha, error"
+    (Other op) -> Op $ weave (Identity ()) (runAction . runIdentity) op
+    _ -> undefined
 ---------- Playground ---------------
 
 example::(HState String :>> sig) => Prog sig String
@@ -186,3 +215,22 @@ example = do
     put "aba"
     res <- get
     pure $ res <> "caba"
+
+example2::(HVoid :>> sig, HExc String :>> sig) => Prog sig Int
+example2 = do
+    r <- catch (throw "oh no, error occured") (\(_::String) -> pure 1)
+    pure $ r + 2
+
+experiment1 = (run . runExc @String) example2
+
+example3::(HExc String :>> sig, HState Int :>> sig, HAction :>> sig) =>
+    Prog sig ()
+example3 = do
+    put (3::Int)
+    catch @String act (\_ -> put (4::Int))
+    pure ()
+
+experiment2 = (run . runState (0::Int) . runExc @String . runAction) example3
+experiment3 = (run . runExc @String . runState (0::Int) . runAction) example3
+
+experiment4 = (run . runExc @String . runState (0::Int) . runAction . runExc @Int) example3

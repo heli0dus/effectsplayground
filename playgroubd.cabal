@@ -27,6 +27,7 @@ library
   exposed-modules:
       Lib
       Scoped
+      Threading
   other-modules:
       Paths_playgroubd
   autogen-modules:
